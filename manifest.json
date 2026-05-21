@@ -1,0 +1,20 @@
+{
+  "name": "GroceryDesk v2 — Smart Indent Manager",
+  "short_name": "GroceryDesk",
+  "description": "Secure multi-user grocery indent management with role-based access",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#141C10",
+  "theme_color": "#2D5F1F",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' fill='%232D5F1F' rx='32'/><text y='.85em' font-size='110' x='28'>🛒</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "lang": "en-IN"
+}
