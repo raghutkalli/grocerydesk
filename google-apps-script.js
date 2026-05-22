@@ -25,14 +25,21 @@ var SHEET_USERS   = 'Users';
 var SHEET_AUDIT   = 'AuditLogs';
 var SHEET_SETTINGS= 'Settings';
 
-// Default admin password hash (SHA-256 of "GroceryDesk@Admin2024")
-// IMPORTANT: Change this via the Setup page after first deployment!
-var DEFAULT_ADMIN_HASH = 'b8c7a3f5e9d2b1a4c6f8e0d3a7b9c2e5f1d4a6b8c0e2d5f7a9b1c3e5d7f9a2b4';
-// NOTE: Above is a placeholder. The actual hash is computed from the real password.
-// Run computeDefaultHash() once to get the real value, then paste it above.
+// Default admin password hash — SHA-256 of "GroceryDesk@Admin2024"
+// This is the REAL computed hash. Change password via Setup & Help after first login.
+var DEFAULT_ADMIN_HASH = '96f4d6ef9ed413f6410cb62c3a42b041190c5fb5a62cc86500bf2e1831fc4cfa';
 
 // Session token validity (hours)
 var SESSION_HOURS = 8;
+
+// ─── CORS: Handle OPTIONS preflight from browsers (required for hosted frontends)
+// Google Apps Script automatically adds Access-Control-Allow-Origin: * to GET responses.
+// Returning a valid response from doOptions prevents preflight failures.
+function doOptions(e) {
+  return ContentService
+    .createTextOutput(JSON.stringify({ status: 'ok', message: 'CORS preflight accepted' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
 
 // ─── ALLOWED STATUS TRANSITIONS ─────────────────────────────────────────
 // Server-side enforcement — mirrors frontend logic
@@ -84,16 +91,34 @@ var ACOL = {
 // ═══════════════════════════════════════════════════════════════════════
 
 /**
- * Handle GET requests
- * Actions: ping, getItems, getOrders, getAll, getDashboard, getAuditLogs
+ * Handle ALL requests via GET.
+ *
+ * Why GET-only? The frontend sends all data (including write ops) as
+ * encoded URL params. This avoids:
+ *   - HTTP 405 errors from GitHub Pages / Netlify (which reject POST)
+ *   - CORS preflight failures from cross-origin POST to GAS
+ *   - Browser converting POST→GET on 301/302 redirects from GAS
+ *
+ * Write-operation data is passed as: ?action=X&payload=URL_ENCODED_JSON
+ * Read-operation params are passed directly: ?action=getOrders&userName=X
  */
 function doGet(e) {
   try {
     var p      = e.parameter || {};
-    var action = p.action || '';
+    var action = p.action    || '';
     var token  = p.adminToken || '';
 
+    // Parse payload sent by frontend for write operations
+    var body = {};
+    if (p.payload) {
+      try { body = JSON.parse(decodeURIComponent(p.payload)); } catch(pe) {
+        return err('Invalid payload JSON: ' + pe.message);
+      }
+    }
+
     switch (action) {
+
+      // ── READ OPERATIONS ──────────────────────────────────────────
       case 'ping':
         return ok({ message: 'GroceryDesk v2 API running', version: '2.0.0' });
 
@@ -101,41 +126,17 @@ function doGet(e) {
         return ok({ items: getItemMaster() });
 
       case 'getOrders':
-        return ok({ orders: getOrdersByUser(p.userName || '') });
+        return ok({ orders: getOrdersByUser(p.userName || body.userName || '') });
 
       case 'getAll':
       case 'getDashboard':
-        // Public: return all orders for dashboard (no admin needed for read)
         return ok({ orders: getAllOrders() });
 
       case 'getAuditLogs':
-        // Admin-only
         if (!verifyAdmin(token)) return err('Unauthorized: admin token required');
-        return ok({ logs: getAuditLogs(parseInt(p.limit || '200')) });
+        return ok({ logs: getAuditLogs(parseInt(p.limit || body.limit || '200')) });
 
-      default:
-        return err('Unknown action: ' + action);
-    }
-  } catch (ex) {
-    return err(ex.message);
-  }
-}
-
-/**
- * Handle POST requests
- * Actions: adminLogin, submitIndent, updateStatus, updateRow, addItem,
- *          changeAdminPassword, initSheets
- */
-function doPost(e) {
-  try {
-    var p    = e.parameter || {};
-    var action = p.action || '';
-    var token  = p.adminToken || '';
-    var body   = {};
-
-    try { body = JSON.parse(e.postData.contents || '{}'); } catch(_) {}
-
-    switch (action) {
+      // ── WRITE OPERATIONS (data arrives via payload URL param) ─────
       case 'adminLogin':
         return ok(adminLogin(body.passwordHash || ''));
 
@@ -143,12 +144,10 @@ function doPost(e) {
         return ok(submitIndent(body));
 
       case 'updateStatus':
-        // Admin-only
         if (!verifyAdmin(token)) return err('Unauthorized: admin token required');
         return ok(updateStatus(body, token));
 
       case 'updateRow':
-        // Admin OR user editing their own Open record
         return ok(updateRow(body, token));
 
       case 'addItem':
@@ -166,6 +165,46 @@ function doPost(e) {
   }
 }
 
+/**
+ * doPost kept for backward compatibility.
+ * The frontend now uses GET-only (via apiCall), so this is a fallback
+ * in case someone calls the API directly with POST.
+ * It delegates to doGet so logic stays in one place.
+ */
+function doPost(e) {
+  try {
+    var p      = e.parameter || {};
+    var action = p.action    || '';
+    var token  = p.adminToken || '';
+    var body   = {};
+
+    // Try to parse POST body first
+    try { body = JSON.parse(e.postData.contents || '{}'); } catch(_) {}
+
+    // Also check payload param (in case sent that way)
+    if (!Object.keys(body).length && p.payload) {
+      try { body = JSON.parse(decodeURIComponent(p.payload)); } catch(_) {}
+    }
+
+    // Delegate to the same handlers used by doGet
+    switch (action) {
+      case 'adminLogin':          return ok(adminLogin(body.passwordHash || ''));
+      case 'submitIndent':        return ok(submitIndent(body));
+      case 'updateStatus':
+        if (!verifyAdmin(token))  return err('Unauthorized: admin token required');
+        return ok(updateStatus(body, token));
+      case 'updateRow':           return ok(updateRow(body, token));
+      case 'addItem':             return ok(addItemToMaster(body.name, body.category));
+      case 'changeAdminPassword':
+        if (!verifyAdmin(token))  return err('Unauthorized: admin token required');
+        return ok(changeAdminPassword(body.newHash || ''));
+      default:                    return err('Unknown action: ' + action);
+    }
+  } catch (ex) {
+    return err(ex.message);
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 //  AUTH FUNCTIONS
 // ═══════════════════════════════════════════════════════════════════════
@@ -177,12 +216,18 @@ function doPost(e) {
 function adminLogin(passwordHash) {
   if (!passwordHash) return { status: 'error', message: 'Password required' };
 
-  var storedHash = getSetting('adminPasswordHash') || DEFAULT_ADMIN_HASH;
+  // Fetch stored hash; if Settings sheet is not set up yet, auto-seed with default
+  var storedHash = getSetting('adminPasswordHash');
+  if (!storedHash) {
+    // First login ever — seed the default hash automatically
+    setSetting('adminPasswordHash', DEFAULT_ADMIN_HASH);
+    setSetting('adminSessions', '[]');
+    storedHash = DEFAULT_ADMIN_HASH;
+  }
 
   if (passwordHash.toLowerCase() !== storedHash.toLowerCase()) {
-    // Log failed attempt
     writeAuditLog('', 'LOGIN', 'Unknown', '', '', 'FAILED LOGIN ATTEMPT', 'user');
-    return { status: 'error', message: 'Invalid password' };
+    return { status: 'error', message: 'Invalid password. If this is your first login, use: GroceryDesk@Admin2024' };
   }
 
   // Generate session token
@@ -763,6 +808,8 @@ function sanitize(val) {
  */
 function ok(data) {
   data.status = data.status || 'ok';
+  // Google automatically adds Access-Control-Allow-Origin: * for deployed web apps
+  // when accessed by a browser. No manual header needed.
   return ContentService
     .createTextOutput(JSON.stringify(data))
     .setMimeType(ContentService.MimeType.JSON);
@@ -823,14 +870,13 @@ function initializeSheets() {
     .setFontWeight('bold').setBackground('#6B7280').setFontColor('#FFFFFF');
   cfg.setFrozenRows(1);
 
-  // Seed default admin password hash
+  // Seed default admin password hash (uses pre-computed constant — no manual step needed)
   var existingHash = getSetting('adminPasswordHash');
   if (!existingHash) {
-    // Default password: GroceryDesk@Admin2024
-    // This is the SHA-256 of "GroceryDesk@Admin2024" — computed via computeDefaultHash()
-    setSetting('adminPasswordHash', computeDefaultHash());
+    setSetting('adminPasswordHash', DEFAULT_ADMIN_HASH);
     setSetting('adminSessions', '[]');
     setSetting('appVersion', '2.0.0');
+    Logger.log('✅ Admin password hash seeded. Default password: GroceryDesk@Admin2024');
   }
 
   Logger.log('✅ All sheets initialized successfully!');
@@ -960,9 +1006,9 @@ function clearAdminSessions() {
  * Run this if you forget your admin password
  */
 function resetAdminPasswordToDefault() {
-  var hash = computeDefaultHash();
-  setSetting('adminPasswordHash', hash);
+  setSetting('adminPasswordHash', DEFAULT_ADMIN_HASH);
   setSetting('adminSessions', '[]');
-  Logger.log('Admin password reset to: GroceryDesk@Admin2024');
-  Logger.log('Hash stored: ' + hash);
+  Logger.log('✅ Admin password reset to: GroceryDesk@Admin2024');
+  Logger.log('Hash stored: ' + DEFAULT_ADMIN_HASH);
+  return 'Password reset to default: GroceryDesk@Admin2024';
 }

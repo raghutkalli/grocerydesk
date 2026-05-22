@@ -437,6 +437,22 @@ tbody tr:hover td{background:var(--bg);}
 </head>
 <body>
 
+<!-- ══ BACKEND SETUP BANNER (shown when no GAS URL is configured) ══ -->
+<div id="setupBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;
+  background:#1E40AF;color:#fff;padding:12px 20px;font-family:inherit;
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+  <span style="font-size:14px;font-weight:600;">⚠️ Backend not connected — enter your Apps Script URL to enable data saving:</span>
+  <input id="bannerUrlInput" type="url" placeholder="https://script.google.com/macros/s/.../exec"
+    style="flex:1;min-width:260px;padding:7px 12px;border-radius:6px;border:none;
+           font-size:13px;font-family:inherit;color:#18180F;outline:none;"/>
+  <button onclick="saveBannerUrl()"
+    style="padding:7px 18px;background:#fff;color:#1E40AF;border:none;border-radius:6px;
+           font-weight:700;font-size:13px;cursor:pointer;font-family:inherit;">Connect</button>
+  <button onclick="document.getElementById('setupBanner').style.display='none'"
+    style="padding:7px 12px;background:rgba(255,255,255,.2);color:#fff;border:none;
+           border-radius:6px;font-size:13px;cursor:pointer;font-family:inherit;">Dismiss</button>
+</div>
+
 <!-- ══ TOAST CONTAINER ══ -->
 <div class="toast-cont" id="toastCont"></div>
 
@@ -449,6 +465,11 @@ tbody tr:hover td{background:var(--bg);}
       <div class="admin-lock-icon">🔐</div>
       <div class="admin-lock-title">Admin Access</div>
       <div class="admin-lock-sub">Enter the admin password to unlock management features.</div>
+      <div style="margin-top:10px;background:#DBEAFE;border:1px solid #93C5FD;border-radius:6px;padding:10px 14px;font-size:13px;color:#1E40AF;line-height:1.7;">
+        🔑 <strong>Default password:</strong><br/>
+        <code style="display:inline-block;margin-top:4px;background:#EFF6FF;padding:4px 10px;border-radius:4px;font-size:13px;letter-spacing:.04em;font-weight:700;color:#1D4ED8;user-select:all;">GroceryDesk@Admin2024</code><br/>
+        <span style="font-size:11px;opacity:.75;display:block;margin-top:4px;">Click the password above to copy it. Change it in Setup &amp; Help after first login.</span>
+      </div>
     </div>
     <div class="form-group mb-4" style="margin-bottom:14px;">
       <label>Password</label>
@@ -980,6 +1001,15 @@ tbody tr:hover td{background:var(--bg);}
 </div><!-- /app -->
 
 <script>
+/* ╔══════════════════════════════════════════════════════════════════════╗
+   ║  ★  STEP 1 — PASTE YOUR GOOGLE APPS SCRIPT URL BELOW  ★           ║
+   ║  Replace the empty '' with your deployed GAS Web App URL.          ║
+   ║  Get it from: Apps Script → Deploy → Manage deployments → URL      ║
+   ╚══════════════════════════════════════════════════════════════════════╝ */
+const PRECONFIGURED_GAS_URL = 'https://script.google.com/macros/s/AKfycbzKghLDW9nY6TbXOiP478sKuTevx492bqMXrsbOqfWid72APi5STDWvR0FC8fyKh4Cf/exec';
+// Example: const PRECONFIGURED_GAS_URL = 'https://script.google.com/macros/s/AKfycb.../exec';
+// After setting this, upload the file. All visitors auto-connect to your backend.
+
 /* ═══════════════════════════════════════════════════════════════════════
    SECTION 1: CONSTANTS & CONFIG
 ═══════════════════════════════════════════════════════════════════════ */
@@ -1033,7 +1063,7 @@ const CHART_COLORS = [
 
 const STATE = {
   // Config
-  scriptUrl: localStorage.getItem('gasUrl') || '',
+  scriptUrl: localStorage.getItem('gasUrl') || PRECONFIGURED_GAS_URL,
   theme:     localStorage.getItem('theme')  || 'light',
   // Auth
   admin: { loggedIn: false, token: null, expiresAt: null, name: 'Admin' },
@@ -1064,7 +1094,10 @@ const STATE = {
    SECTION 3: INIT
 ═══════════════════════════════════════════════════════════════════════ */
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+  // Initialise local admin hash (sets default if not already stored)
+  await initLocalAdminHash();
+
   // Restore config
   if (STATE.scriptUrl) document.getElementById('configUrl') && (document.getElementById('configUrl').value = STATE.scriptUrl);
 
@@ -1100,6 +1133,16 @@ window.addEventListener('DOMContentLoaded', () => {
 
   // Load dashboard data
   loadDashboard();
+
+  // Show backend setup banner if no GAS URL configured
+  checkSetupBanner();
+
+  // Register Service Worker for PWA offline support
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js')
+      .then(() => console.log('GroceryDesk SW registered'))
+      .catch(err => console.warn('SW registration skipped (local file mode):', err.message));
+  }
 
   // Set up add-row close on outside click
   document.addEventListener('click', e => {
@@ -1192,42 +1235,108 @@ function applyTheme(theme) {
    SECTION 6: ADMIN AUTH
 ═══════════════════════════════════════════════════════════════════════ */
 
+/**
+ * Ensure a local admin password hash exists in localStorage.
+ * Called once on page load. Default password: GroceryDesk@Admin2024
+ */
+async function initLocalAdminHash() {
+  try {
+    if (!localStorage.getItem('localAdminHash')) {
+      const defaultHash = await sha256('GroceryDesk@Admin2024');
+      localStorage.setItem('localAdminHash', defaultHash);
+      console.log('GroceryDesk: local admin hash initialised');
+    }
+  } catch(e) {
+    console.warn('Could not init local admin hash:', e.message);
+    // Non-fatal — login will recompute on the fly
+  }
+}
+
+/**
+ * Central function to grant admin access and persist the session.
+ * Works with either a backend token or a local-only session.
+ */
+function grantAdminAccess(token, expiresAt, source) {
+  const expiry = expiresAt || new Date(Date.now() + 8 * 3600 * 1000).toISOString();
+  STATE.admin  = { loggedIn: true, token: token, expiresAt: expiry, name: 'Admin' };
+  sessionStorage.setItem('adminSession', JSON.stringify(STATE.admin));
+  updateAdminUI();
+  closeOverlay('adminLoginModal');
+  document.getElementById('adminPassInput').value = '';
+  document.getElementById('adminLoginErr').textContent = '';
+
+  const label = (source === 'backend') ? 'Admin access granted (synced with server)' :
+                (source === 'local-nourl') ? 'Admin access granted ✓  — Tip: configure your Apps Script URL in Setup & Help to enable full features' :
+                'Admin access granted';
+  showToast(label, 'success');
+
+  if (STATE._pendingPage) {
+    navigate(STATE._pendingPage);
+    STATE._pendingPage = null;
+  }
+}
+
+/**
+ * Submit admin login — works in three modes:
+ *  1. No backend URL: pure local auth (hash check against localStorage)
+ *  2. Backend URL set, reachable: backend auth → get session token
+ *  3. Backend URL set, unreachable: falls back to local auth automatically
+ */
 async function submitAdminLogin() {
-  const pass = document.getElementById('adminPassInput').value;
+  const pass  = document.getElementById('adminPassInput').value;
   const errEl = document.getElementById('adminLoginErr');
   const btn   = document.getElementById('adminLoginBtn');
+
   if (!pass) { errEl.textContent = 'Please enter a password'; return; }
 
   btn.innerHTML = '<span class="spinner spinner-sm"></span> Verifying...';
-  btn.disabled = true;
+  btn.disabled  = true;
   errEl.textContent = '';
 
   try {
-    // Hash the password client-side
     const hash = await sha256(pass);
-    const res = await apiPost('adminLogin', { passwordHash: hash });
 
-    if (res.status === 'ok' && res.token) {
-      STATE.admin = { loggedIn: true, token: res.token, expiresAt: res.expiresAt, name: res.adminName || 'Admin' };
-      sessionStorage.setItem('adminSession', JSON.stringify(STATE.admin));
-      updateAdminUI();
-      closeOverlay('adminLoginModal');
-      document.getElementById('adminPassInput').value = '';
-      showToast('Admin access granted', 'success');
-
-      if (STATE._pendingPage) {
-        navigate(STATE._pendingPage);
-        STATE._pendingPage = null;
+    // ── MODE 1 & 2: Try backend first if URL is configured ─────────────
+    if (STATE.scriptUrl) {
+      try {
+        const res = await apiPost('adminLogin', { passwordHash: hash });
+        if (res.status === 'ok' && res.token) {
+          // Full backend login success — server token granted
+          grantAdminAccess(res.token, res.expiresAt, 'backend');
+          btn.innerHTML = unlockBtnHtml(); btn.disabled = false;
+          return;
+        }
+        // Backend returned an error (wrong hash, GAS not set up, etc.)
+        // Do NOT stop here — fall through to local auth below
+        console.warn('Backend login failed:', res.message, '— trying local auth');
+      } catch(networkErr) {
+        // Network/fetch error — fall through to local auth
+        console.warn('Backend unreachable:', networkErr.message, '— trying local auth');
       }
-    } else {
-      errEl.textContent = res.message || 'Invalid password';
     }
+
+    // ── MODE 3: Local auth ───────────────────────────────────────────
+    // Works when: no GAS URL, backend not set up yet, or backend unreachable.
+    // Local hash is seeded from SHA-256('GroceryDesk@Admin2024') on first load.
+    const localHash = localStorage.getItem('localAdminHash') || await sha256('GroceryDesk@Admin2024');
+    if (hash === localHash) {
+      const localToken = 'local-' + Date.now().toString(36);
+      const source = STATE.scriptUrl ? 'local-fallback' : 'local-nourl';
+      grantAdminAccess(localToken, null, source);
+    } else {
+      errEl.textContent = 'Incorrect password. Default password: GroceryDesk@Admin2024';
+    }
+
   } catch(e) {
-    errEl.textContent = 'Login failed: ' + e.message;
+    errEl.textContent = 'Error: ' + e.message;
   }
 
-  btn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg> Unlock`;
-  btn.disabled = false;
+  btn.innerHTML = unlockBtnHtml();
+  btn.disabled  = false;
+}
+
+function unlockBtnHtml() {
+  return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg> Unlock`;
 }
 
 function toggleAdminMode() {
@@ -1287,34 +1396,70 @@ async function sha256(msg) {
 
 /* ═══════════════════════════════════════════════════════════════════════
    SECTION 7: API LAYER
+   All calls use GET — avoids every CORS / 405 / redirect issue with GAS.
+   Data for write operations is sent as an encoded 'payload' URL param.
 ═══════════════════════════════════════════════════════════════════════ */
 
-async function apiGet(action, params = {}) {
-  if (!STATE.scriptUrl) throw new Error('Apps Script URL not configured. Go to Setup & Help.');
+/**
+ * Unified GET-based API call.
+ * Sending data as a URL param (GET) bypasses:
+ *  - HTTP 405 on GitHub Pages / Netlify (which reject POST)
+ *  - CORS preflight issues with GAS cross-origin POST
+ *  - Browser redirect method-change (POST → GET on 302)
+ */
+async function apiCall(action, body = null) {
+  if (!STATE.scriptUrl)
+    throw new Error('Backend not configured. Open Setup & Help to paste your Apps Script URL.');
+
   const url = new URL(STATE.scriptUrl);
   url.searchParams.set('action', action);
-  if (STATE.admin.token) url.searchParams.set('adminToken', STATE.admin.token);
-  Object.entries(params).forEach(([k,v]) => url.searchParams.set(k, v));
-  const r = await fetch(url.toString());
+
+  // Encode write-operation data as a URL parameter (safe over HTTPS)
+  if (body && Object.keys(body).length > 0)
+    url.searchParams.set('payload', encodeURIComponent(JSON.stringify(body)));
+
+  // Attach server-side admin token (never send local-only tokens to GAS)
+  const tokenIsLocal = STATE.admin.token && STATE.admin.token.startsWith('local-');
+  if (STATE.admin.token && !tokenIsLocal)
+    url.searchParams.set('adminToken', STATE.admin.token);
+
+  const r = await fetch(url.toString()); // Always GET — zero CORS/405 risk
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
   return r.json();
 }
 
-async function apiPost(action, body = {}) {
-  if (!STATE.scriptUrl && action !== 'adminLogin')
-    throw new Error('Apps Script URL not configured. Go to Setup & Help.');
-  const url = STATE.scriptUrl ? new URL(STATE.scriptUrl) : new URL(document.location.href);
-  url.searchParams.set('action', action);
-  if (STATE.admin.token) url.searchParams.set('adminToken', STATE.admin.token);
-  const r = await fetch(url.toString(), {
-    method: 'POST',
-    body: JSON.stringify(body)
-  });
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
-  return r.json();
-}
+// Backward-compatible aliases — all existing call sites stay unchanged
+async function apiGet(action, params = {})  { return apiCall(action, Object.keys(params).length ? params : null); }
+async function apiPost(action, body = {})   { return apiCall(action, body); }
 
 function getScriptUrl() { return localStorage.getItem('gasUrl') || ''; }
+
+/** Save the URL entered in the setup banner, then reload data */
+function saveBannerUrl() {
+  const val = (document.getElementById('bannerUrlInput')?.value || '').trim();
+  if (!val || !val.startsWith('http')) { showToast('Please enter a valid URL starting with https://', 'error'); return; }
+  STATE.scriptUrl = val;
+  localStorage.setItem('gasUrl', val);
+  document.getElementById('setupBanner').style.display = 'none';
+  // Also update Setup page input if it exists
+  const cfgInput = document.getElementById('configUrl');
+  if (cfgInput) cfgInput.value = val;
+  showToast('Backend connected! Loading data...', 'success');
+  loadItemMaster();
+  loadDashboard();
+}
+
+/** Show/hide the setup banner based on whether a GAS URL is configured */
+function checkSetupBanner() {
+  const banner = document.getElementById('setupBanner');
+  if (!banner) return;
+  if (!STATE.scriptUrl) {
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
 
 /* ═══════════════════════════════════════════════════════════════════════
    SECTION 8: DATE FILTER SYSTEM
@@ -2341,6 +2486,7 @@ function renderSetupPage() {
 function saveConfigUrl(val) {
   STATE.scriptUrl = val.trim();
   localStorage.setItem('gasUrl', STATE.scriptUrl);
+  checkSetupBanner(); // hide banner once URL is configured
 }
 
 async function testConn() {
@@ -2363,12 +2509,33 @@ async function changeAdminPass() {
   if (!np) { showToast('Enter new password', 'error'); return; }
   if (np !== cp) { showToast('Passwords do not match', 'error'); return; }
   if (np.length < 6) { showToast('Password must be at least 6 characters', 'error'); return; }
-  try {
-    const hash = await sha256(np);
-    const res  = await apiPost('changeAdminPassword', { newHash: hash });
-    if (res.status === 'ok') showToast('Admin password updated', 'success');
-    else showToast(res.message || 'Failed', 'error');
-  } catch(e) { showToast(e.message, 'error'); }
+
+  const hash = await sha256(np);
+
+  // Always update locally — login works even without a backend
+  localStorage.setItem('localAdminHash', hash);
+
+  // Also sync to backend if URL is configured and we have a real (non-local) token
+  if (STATE.scriptUrl && STATE.admin.token && !STATE.admin.token.startsWith('local-')) {
+    try {
+      const res = await apiPost('changeAdminPassword', { newHash: hash });
+      if (res.status === 'ok') {
+        showToast('Password updated (local + server). Please log in again.', 'success');
+      } else {
+        showToast('Local password updated. Server sync failed: ' + (res.message || ''), 'warn');
+      }
+    } catch(e) {
+      showToast('Local password updated. Server unreachable — reconnect to sync.', 'warn');
+    }
+  } else {
+    showToast('Password updated locally. Log in again with your new password.', 'success');
+  }
+
+  // Force re-login so new password takes effect
+  STATE.admin = { loggedIn: false, token: null, expiresAt: null, name: 'Admin' };
+  sessionStorage.removeItem('adminSession');
+  updateAdminUI();
+  navigate('dashboard');
 }
 
 function setupSteps() {
